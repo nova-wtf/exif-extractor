@@ -4,25 +4,28 @@ Remove EXIF, XMP and other metadata from images and videos, in the browser and o
 
 - **No dependencies, no WebAssembly, no native code.** Plain TypeScript that runs anywhere `Blob` and `Uint8Array` exist: browsers, Web Workers, Node, Deno, Bun.
 - **No re-encoding.** The image and video data are never decoded or touched, so there's no quality loss and it's fast.
-- **Doesn't load files into memory.** It reads only the small headers it needs. The result is built from slices of the original `Blob`, so a 4 GB video costs a few kilobytes of memory.
+- **Doesn't load files into memory.** It reads only headers and indexes (JPEGs are also scanned in small chunks to find hidden trailers). The result is built from slices of the original `Blob`, so a 4 GB video costs well under a megabyte of memory.
 - **Never modifies your input.** You always get a new `Blob` back.
 
 ## Supported formats
 
-| Format          | Extensions                  | What's removed                                                             | How                                               |
-| --------------- | --------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------- |
-| JPEG            | `.jpg` `.jpeg` `.jfif`      | EXIF, XMP, Extended XMP, IPTC, comments, vendor APP segments               | cut                                               |
-| PNG / APNG      | `.png`                      | EXIF, XMP, text chunks (`tEXt` `zTXt` `iTXt`), `tIME`, known vendor chunks | cut                                               |
-| WebP            | `.webp`                     | EXIF, XMP                                                                  | cut, and the RIFF size and VP8X flags are updated |
-| AVI             | `.avi`                      | `INFO` list, XMP, stream names and stream data                             | overwritten with `JUNK`                           |
-| MP4 / MOV / 3GP | `.mp4` `.m4v` `.mov` `.3gp` | `udta` (GPS, make, model), `meta` (Apple metadata), XMP                    | overwritten with `free`                           |
-| WebM / MKV      | `.webm` `.mkv`              | `Tags`, `DateUTC`, `Title`, `SegmentUUID`, track names                     | overwritten with `Void`                           |
+| Format          | Extensions                          | What's removed                                                                                       | How                                                  |
+| --------------- | ----------------------------------- | ---------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| JPEG            | `.jpg` `.jpeg` `.jfif`              | EXIF, XMP, Extended XMP, IPTC, comments, vendor APP segments, trailers such as motion photo videos   | cut, and the MPF index is updated                    |
+| PNG / APNG      | `.png`                              | EXIF, XMP, text chunks, `tIME`, unknown ancillary chunks, data after the image                       | cut                                                  |
+| WebP            | `.webp`                             | EXIF, XMP, unknown chunks, data after the image                                                      | cut, and the RIFF size and VP8X flags are updated    |
+| GIF             | `.gif`                              | comments, XMP, application data (looping and color profiles are kept), data after the image          | cut                                                  |
+| TIFF            | `.tif` `.tiff`                      | EXIF and GPS directories, make, model, dates, author, XMP, IPTC, Photoshop data                      | directory rewritten in place, values zeroed          |
+| HEIC / AVIF     | `.heic` `.heif` `.avif`             | EXIF, XMP and other metadata items                                                                   | emptied in place                                     |
+| MP4 / MOV / 3GP | `.mp4` `.m4v` `.mov` `.3gp`         | `udta` (GPS, make, model), `meta`, XMP, creation dates, GPS and sensor tracks (GoPro, DJI, CAMM, Apple) | boxes become `free`; dates and samples are zeroed |
+| AVI             | `.avi`                              | `INFO` list, XMP, stream names and data, recording date                                              | overwritten with `JUNK`                              |
+| WebM / MKV      | `.webm` `.mkv`                      | `Tags`, `DateUTC`, `Title`, `SegmentUUID`, track names                                               | overwritten with `Void`                              |
 
 Formats are detected from the file's bytes, never from its name or MIME type.
 
-**Cut** means the metadata is removed and the file gets smaller. **Overwritten** means it's replaced by a filler block of the same size that every reader skips. Video formats store byte positions of their frames, so removing bytes would break playback; overwriting keeps every position the same.
+**Cut** means the metadata is removed and the file gets smaller. **Overwritten** (also "in place") means the file keeps its size. Video, TIFF and HEIC files store byte positions of their data, so removing bytes would break them.
 
-The parts a file needs to display correctly are always kept: ICC color profiles, JFIF and Adobe headers, PNG transparency and color chunks, animation data, and all video and audio headers.
+The parts a file needs to display correctly are kept: ICC color profiles, JFIF and Adobe headers, PNG transparency and color chunks, HDR gain map images, animation data, and all video and audio headers.
 
 ## Install
 
@@ -54,6 +57,14 @@ const withoutExif = await removeExif(file);
 
 Only EXIF is removed; XMP, comments and other metadata stay. Note that **XMP can contain GPS too**, so use `removeMetadata` if the goal is privacy.
 
+### Orientation
+
+Photos taken in portrait rely on the EXIF orientation tag. For JPEG, PNG and WebP (extended format) both functions keep that one tag and drop the rest of the EXIF, so `inspect` still lists a tiny `exif` segment afterwards. To remove it as well:
+
+```ts
+await removeMetadata(file, { keepOrientation: false });
+```
+
 ### See what's in a file
 
 ```ts
@@ -67,7 +78,7 @@ const { format, segments } = await inspect(file);
 // ]
 ```
 
-Nothing is changed. Each segment has a `kind` (`"exif"`, `"xmp"`, `"exmp"`, `"iptc"`, `"comment"`, `"vendor"` or `"other"`), its position and size in the file, and for EXIF and XMP, where the actual data starts.
+Nothing is changed. `format` is one of `"jpeg"`, `"png"`, `"webp"`, `"gif"`, `"tiff"`, `"avi"`, `"isobmff"` (MP4, MOV, HEIC, AVIF) or `"ebml"` (WebM, MKV). Each segment has a `kind` (`"exif"`, `"xmp"`, `"exmp"`, `"iptc"`, `"comment"`, `"vendor"` or `"other"`), its position and size in the file, and for EXIF and XMP, where the actual data starts.
 
 ### Errors
 
@@ -82,7 +93,7 @@ try {
   file = await removeMetadata(file);
 } catch (e) {
   if (e instanceof UnsupportedFormatError) {
-    // not a format this package handles (zip, pdf, HEIC, …): use the original
+    // not a format this package handles (zip, pdf, camera RAW, …): use the original
   } else if (e instanceof CorruptFileError) {
     // the file claims to be a supported format but its structure is broken
     console.warn(e.format, e.offset, e.message);
@@ -147,7 +158,7 @@ export async function POST({ request }) {
 
 This works in any server that uses the standard `Request` API (SvelteKit, Next.js route handlers, Hono, Deno, Bun, …).
 
-`request.formData()` reads the upload into memory, so set a size limit. For very large uploads, write the request to a temporary file first and pass a `Blob` backed by that file, so only the small headers are read:
+`request.formData()` reads the upload into memory, so set a size limit. For very large uploads, write the request to a temporary file first and pass a `Blob` backed by that file, so the file isn't loaded into memory:
 
 ```ts
 // Node 19.8+
@@ -160,17 +171,13 @@ const clean = await removeMetadata(Bun.file(path));
 
 ## Limitations
 
-These are known and documented, not bugs:
-
-- **JPEG orientation is not kept.** Removing EXIF also removes the rotation tag, so photos taken in portrait may display sideways. Keeping only the orientation tag is planned.
-- **HEIC / AVIF are not supported yet.** Their metadata is stored differently from MP4 (as items inside `meta`), so they're rejected with `UnsupportedFormatError` instead of being damaged.
-- **JPEG trailers are not checked.** Extra data after the end of the image, such as Google/Samsung Motion Photos (a short MP4 with audio) or MPF secondary images, keeps its own metadata.
-- **GPS stored as a video track** (GoPro, DJI drones) is not removed. Only box-level metadata is.
-- **Live WebM recordings:** metadata written after the first unknown-size Cluster is not found.
-- **WebM/MKV headers:** the EBML header is expected in the common layout (1-byte sizes), which is what ffmpeg, browsers and mkvmerge write. Other layouts are rejected rather than guessed.
-- **MKV checksums:** files from mkvmerge contain CRC-32 elements that no longer match after stripping. Players ignore them; strict validators may warn.
-- **PNG:** chunk types that aren't on the known list are kept.
-- **Other formats** (GIF, TIFF, RAW, PDF, archives, …) are rejected with `UnsupportedFormatError`.
+- **Camera RAW** (CR2, CR3, DNG and similar TIFF-based files) is rejected, because decoders depend on the camera data. BigTIFF is rejected too.
+- **Other formats** (BMP, SVG, PDF, audio, office documents, archives, …) are rejected with `UnsupportedFormatError`.
+- **Content is never edited:** anything visible or audible in the picture or sound stays.
+- **Fragmented MP4:** GPS and sensor tracks are unlinked, but samples stored in movie fragments are not zeroed.
+- **Apple Live Photos:** removing the timed metadata track can break the pairing between the photo and its video.
+- **Ultra HDR JPEG:** `removeMetadata` removes the XMP that some viewers use to find the gain map; they will show the standard image. ISO 21496-1 gain map data is kept.
+- **MKV attachments and chapters** are kept.
 
 ## Checking the result
 

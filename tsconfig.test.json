@@ -1,9 +1,11 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "types": ["bun"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "rootDir": ".",
     "noEmit": true,
     "allowImportingTsExtensions": true
   },
-  "include": ["src", "test"]
+  "include": ["src", "tests"]
 }

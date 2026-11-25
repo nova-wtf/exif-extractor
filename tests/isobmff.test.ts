@@ -102,18 +102,14 @@ describe("ISOBMFF: detect", () => {
     }
   });
 
-  test("rejects HEIC / AVIF / CR3 (their meta box is the image itself)", () => {
-    for (const brand of [
-      "heic",
-      "heix",
-      "mif1",
-      "msf1",
-      "avif",
-      "avis",
-      "crx ",
-    ]) {
-      expect(isobmff.detect(ftyp(brand))).toBe(false);
+  test("accepts HEIC and AVIF", () => {
+    for (const brand of ["heic", "heix", "mif1", "msf1", "avif", "avis"]) {
+      expect(isobmff.detect(ftyp(brand))).toBe(true);
     }
+  });
+
+  test("rejects CR3 (camera RAW)", () => {
+    expect(isobmff.detect(ftyp("crx "))).toBe(false);
   });
 
   test("rejects files without ftyp at bytes 4–7", () => {

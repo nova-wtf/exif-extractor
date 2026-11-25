@@ -2,45 +2,61 @@
  * SPDX-License-Identifier: PolyForm-Shield-1.0.0
  * Copyright (c) 2026 Arda Emek and Lorns Hanna (https://nova.wtf)
  */
-import { findAllSegments } from "./core.js";
+import { analyze } from "./core.js";
 import { applyPatches } from "./patch.js";
-import type { Patch, Segment } from "./types.js";
+import type { Format, RemoveOptions, Segment } from "./types.js";
 
 async function removeSegments(
   input: Blob,
   filter: (s: Segment) => boolean,
+  { keepOrientation = true }: RemoveOptions,
 ): Promise<Blob> {
-  const { format, segments } = await findAllSegments(input);
+  const { handler, reader, items } = await analyze(input);
 
-  const patches: Patch[] = segments.filter(filter).map((s) => ({
-    offset: s.offset,
-    length: s.length,
-    bytes: new Uint8Array(0), // cut; formats that can't be cut turn this into a filler block
-    kind: s.kind,
-  }));
-
-  if (patches.length === 0) {
+  const selected = items.filter(filter);
+  if (selected.length === 0) {
     return input;
   }
 
-  return applyPatches(input, patches, format);
+  const patches = await handler.toPatches(reader, selected, {
+    keepOrientation,
+  });
+
+  return applyPatches(input, patches, handler.name);
 }
 
 /** Removes only EXIF data. XMP, comments and other metadata are kept. */
-export function removeExif(input: Blob): Promise<Blob> {
-  return removeSegments(input, (s) => s.kind === "exif");
+export function removeExif(
+  input: Blob,
+  options: RemoveOptions = {},
+): Promise<Blob> {
+  return removeSegments(input, (s) => s.kind === "exif", options);
 }
 
 /** Removes all metadata the handlers find: EXIF, XMP, IPTC, comments, vendor data, … */
-export function removeMetadata(input: Blob): Promise<Blob> {
-  return removeSegments(input, () => true);
+export function removeMetadata(
+  input: Blob,
+  options: RemoveOptions = {},
+): Promise<Blob> {
+  return removeSegments(input, () => true, options);
 }
 
 /** Lists the metadata in a file without changing anything. */
 export async function inspect(
   input: Blob,
-): Promise<{ format: string; segments: Segment[] }> {
-  return findAllSegments(input);
+): Promise<{ format: Format; segments: Segment[] }> {
+  const { handler, items } = await analyze(input);
+
+  const segments = items.map(
+    ({ kind, offset, length, dataOffset, dataLength }) => ({
+      kind,
+      offset,
+      length,
+      ...(dataOffset !== undefined && { dataOffset }),
+      ...(dataLength !== undefined && { dataLength }),
+    }),
+  );
+  return { format: handler.name, segments };
 }
 
 export {
@@ -49,4 +65,10 @@ export {
   UnsupportedFormatError,
 } from "./errors.js";
 
-export type { Patch, Segment, SegmentType } from "./types.js";
+export type {
+  Format,
+  Patch,
+  RemoveOptions,
+  Segment,
+  SegmentType,
+} from "./types.js";

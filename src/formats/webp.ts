@@ -3,37 +3,40 @@
  * Copyright (c) 2026 Arda Emek and Lorns Hanna (https://nova.wtf)
  */
 import { CorruptFileError } from "../errors.js";
-import type { FormatHandler, Segment } from "../types.js";
-import { checkPrefix, readUint32LE } from "../utils.js";
+import { orientationTiff, readOrientation } from "../exif.js";
+import type { FormatHandler, Item } from "../types.js";
+import {
+  ascii,
+  checkPrefix,
+  concatBytes,
+  cutAll,
+  fourcc,
+  readUint32LE,
+  uintBytes,
+} from "../utils.js";
 
-const prefixSignature = [0x52, 0x49, 0x46, 0x46];
-const suffixSignature = [0x57, 0x45, 0x42, 0x50];
+const exifPrefix = ascii("Exif\0\0");
 
-const encoder = new TextEncoder();
-const exifPrefix = encoder.encode("Exif\0\0");
+const keptTypes = new Set([
+  "VP8X",
+  "VP8 ",
+  "VP8L",
+  "ALPH",
+  "ANIM",
+  "ANMF",
+  "ICCP",
+]);
 
-const headers = {
-  exif: [encoder.encode("EXIF")],
-  xmp: [encoder.encode("XMP ")],
-  keep: [
-    encoder.encode("VP8X"),
-    encoder.encode("VP8 "),
-    encoder.encode("VP8L"),
-    encoder.encode("ALPH"),
-    encoder.encode("ANIM"),
-    encoder.encode("ANMF"),
-    encoder.encode("ICCP"),
-  ],
-};
+const EXIF_FLAG = 0x08;
+const XMP_FLAG = 0x04;
 
 export const webp: FormatHandler = {
   name: "webp",
   detect: (h) =>
-    h.length >= 12 &&
-    prefixSignature.every((v, i) => h[i] == v) &&
-    suffixSignature.every((v, i) => h[i + 8] == v),
+    h.length >= 12 && fourcc(h) === "RIFF" && fourcc(h, 8) === "WEBP",
+
   async findSegments(r) {
-    const segments: Segment[] = [];
+    const items: Item[] = [];
 
     const riffHeader = await r.read(0, 12);
     if (riffHeader.length < 12) {
@@ -47,9 +50,12 @@ export const webp: FormatHandler = {
 
     let pos = 12;
     for (let i = 0; i < 100_000; i++) {
-      // End of metadata
+      // End of the image: anything after it isn't part of the WebP
       if (pos >= end) {
-        return segments;
+        if (end < r.size) {
+          items.push({ kind: "other", offset: end, length: r.size - end });
+        }
+        return items;
       }
 
       const header = await r.read(pos, 8);
@@ -58,40 +64,37 @@ export const webp: FormatHandler = {
       }
 
       const length = readUint32LE(header, 4);
-
-      const padding = length % 2;
-      const chunkSize = 8 + length + padding;
+      const chunkSize = 8 + length + (length % 2);
 
       if (pos + chunkSize > end) {
         throw new CorruptFileError("invalid chunk size", "webp", pos);
       }
 
-      const type = header.subarray(0, 4);
-      const kind = findKind(type);
-      if (kind === "exif") {
+      const type = fourcc(header);
+      const item = { offset: pos, length: chunkSize };
+
+      if (type === "EXIF") {
         const start = await r.read(
           pos + 8,
           Math.min(exifPrefix.length, length),
         );
         const skip = checkPrefix(start, exifPrefix) ? exifPrefix.length : 0;
 
-        segments.push({
-          offset: pos,
-          length: chunkSize,
+        items.push({
+          ...item,
           kind: "exif",
           dataOffset: pos + 8 + skip,
           dataLength: length - skip,
         });
-      } else if (kind === "xmp") {
-        segments.push({
-          offset: pos,
-          length: chunkSize,
+      } else if (type === "XMP ") {
+        items.push({
+          ...item,
           kind: "xmp",
           dataOffset: pos + 8,
           dataLength: length,
         });
-      } else if (kind != "keep") {
-        segments.push({ offset: pos, length: chunkSize, kind: "other" });
+      } else if (!keptTypes.has(type)) {
+        items.push({ ...item, kind: "other" });
       }
 
       pos += chunkSize;
@@ -99,14 +102,69 @@ export const webp: FormatHandler = {
 
     throw new CorruptFileError("too many chunks", "webp");
   },
-};
 
-type Kind = keyof typeof headers;
-function findKind(type: Uint8Array): Kind | undefined {
-  for (const kind of Object.keys(headers) as Kind[]) {
-    if (headers[kind].some((h) => checkPrefix(type, h))) {
-      return kind;
+  async toPatches(r, selected, { keepOrientation }) {
+    const patches = cutAll(selected);
+
+    const head = await r.read(0, 21); // RIFF header + first chunk's type, size, flags
+    const riffSize = readUint32LE(head, 4);
+    const isVp8x = head.length === 21 && fourcc(head, 12) === "VP8X";
+
+    let keptExif = false;
+    if (keepOrientation && isVp8x) {
+      for (const s of selected) {
+        if (s.kind !== "exif") continue;
+
+        const orientation = await readOrientation(
+          r,
+          s.dataOffset!,
+          s.dataLength!,
+        );
+        if (orientation === undefined) continue;
+
+        const tiff = orientationTiff(orientation);
+        patches.find((p) => p.offset === s.offset)!.bytes = concatBytes(
+          ascii("EXIF"),
+          uintBytes(tiff.length, 4, true),
+          tiff,
+        );
+        keptExif = true;
+        break;
+      }
     }
-  }
-  return undefined;
-}
+
+    if (isVp8x) {
+      const oldFlags = head[20]!;
+      let flags = oldFlags;
+      if (!keptExif && selected.some((s) => s.kind === "exif")) {
+        flags &= ~EXIF_FLAG;
+      }
+      if (selected.some((s) => s.kind === "xmp")) flags &= ~XMP_FLAG;
+
+      if (flags !== oldFlags) {
+        patches.push({
+          kind: "other",
+          offset: 20,
+          length: 1,
+          bytes: new Uint8Array([flags]),
+        });
+      }
+    }
+
+    // Bytes after the RIFF chunk were never counted in its size
+    const removed = patches
+      .filter((p) => p.offset >= 12 && p.offset < 8 + riffSize)
+      .reduce((n, p) => n + p.length - p.bytes.length, 0);
+
+    if (removed !== 0) {
+      patches.push({
+        kind: "other",
+        offset: 4,
+        length: 4,
+        bytes: uintBytes(riffSize - removed, 4, true),
+      });
+    }
+
+    return patches;
+  },
+};

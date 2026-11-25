@@ -3,36 +3,32 @@
  * Copyright (c) 2026 Arda Emek and Lorns Hanna (https://nova.wtf)
  */
 import { CorruptFileError } from "../errors.js";
-import type { FormatHandler, Segment } from "../types.js";
-import { checkPrefix, readUint32LE } from "../utils.js";
+import type { FormatHandler, Item, SegmentType } from "../types.js";
+import {
+  ascii,
+  concatBytes,
+  cut,
+  fourcc,
+  readUint32LE,
+  uintBytes,
+} from "../utils.js";
 
-const prefixSignature = [0x52, 0x49, 0x46, 0x46];
-const suffixSignature = [0x41, 0x56, 0x49, 0x20];
+const chunkKinds = new Map<string, SegmentType>([
+  ["_PMX", "xmp"],
+  ["strd", "vendor"],
+  ["strn", "comment"],
+  ["IDIT", "other"], // recording date
+]);
 
-const encoder = new TextEncoder();
-
-const riffCheck = encoder.encode("RIFF");
-const avixHeader = encoder.encode("AVIX");
-
-const listHeader = encoder.encode("LIST");
-
-const infoHeader = encoder.encode("INFO");
-const checkHeaders = [encoder.encode("hdrl"), encoder.encode("strl")];
-
-const headers = {
-  xmp: [encoder.encode("_PMX")],
-  vendor: [encoder.encode("strd")],
-  comment: [encoder.encode("strn")],
-};
+const walkedLists = new Set(["hdrl", "strl"]);
 
 export const avi: FormatHandler = {
   name: "avi",
   detect: (h) =>
-    h.length >= 12 &&
-    prefixSignature.every((v, i) => h[i] == v) &&
-    suffixSignature.every((v, i) => h[i + 8] == v),
+    h.length >= 12 && fourcc(h) === "RIFF" && fourcc(h, 8) === "AVI ",
+
   async findSegments(r) {
-    const segments: Segment[] = [];
+    const items: Item[] = [];
 
     const riffHeader = await r.read(0, 12);
     if (riffHeader.length < 12) {
@@ -45,24 +41,34 @@ export const avi: FormatHandler = {
     }
 
     let pos = 12;
-    chunks: for (let i = 0; i < 10_000; i++) {
-      // End of metadata
+    for (let i = 0; i < 100_000; i++) {
       if (pos >= end) {
-        const extendedHeader = await r.read(end, 12);
+        // Files over 1 GB continue in more RIFF blocks
+        const next = await r.read(end, 12);
         if (
-          extendedHeader.length === 12 &&
-          checkPrefix(extendedHeader, riffCheck) &&
-          checkPrefix(extendedHeader.subarray(8, 12), avixHeader)
+          next.length === 12 &&
+          fourcc(next) === "RIFF" &&
+          fourcc(next, 8) === "AVIX"
         ) {
           const blockStart = end;
-          end = blockStart + 8 + readUint32LE(extendedHeader, 4);
+          end = blockStart + 8 + readUint32LE(next, 4);
           if (end > r.size) {
             throw new CorruptFileError("truncated file", "avi", blockStart);
           }
           pos = blockStart + 12;
-          continue chunks;
+          continue;
         }
-        return segments;
+
+        // Anything after the last RIFF block isn't part of the video
+        if (end < r.size) {
+          items.push({
+            kind: "other",
+            offset: end,
+            length: r.size - end,
+            cut: true,
+          });
+        }
+        return items;
       }
 
       const header = await r.read(pos, 12);
@@ -71,38 +77,32 @@ export const avi: FormatHandler = {
       }
 
       const length = readUint32LE(header, 4);
-
-      const padding = length % 2;
-      const chunkSize = 8 + length + padding;
+      const chunkSize = 8 + length + (length % 2);
 
       if (pos + chunkSize > end) {
         throw new CorruptFileError("invalid chunk size", "avi", pos);
       }
 
-      const type = header.subarray(0, 4);
-      if (checkPrefix(type, listHeader)) {
-        const listType = header.subarray(8, 12);
+      const type = fourcc(header);
+      if (type === "LIST") {
+        const listType = fourcc(header, 8);
 
-        if (checkPrefix(listType, infoHeader)) {
-          segments.push({
+        if (listType === "INFO") {
+          items.push({
             kind: "comment",
             offset: pos,
             length: chunkSize,
             dataOffset: pos + 12,
             dataLength: length - 4,
           });
-        }
-
-        for (const check of checkHeaders) {
-          if (checkPrefix(listType, check)) {
-            pos += 12;
-            continue chunks;
-          }
+        } else if (walkedLists.has(listType)) {
+          pos += 12;
+          continue;
         }
       } else {
-        const kind = findKind(type);
+        const kind = chunkKinds.get(type);
         if (kind) {
-          segments.push({ kind, offset: pos, length: chunkSize });
+          items.push({ kind, offset: pos, length: chunkSize });
         }
       }
 
@@ -111,14 +111,18 @@ export const avi: FormatHandler = {
 
     throw new CorruptFileError("too many chunks", "avi");
   },
-};
 
-type Kind = keyof typeof headers;
-function findKind(type: Uint8Array): Kind | undefined {
-  for (const kind of Object.keys(headers) as Kind[]) {
-    if (headers[kind].some((h) => checkPrefix(type, h))) {
-      return kind;
-    }
-  }
-  return undefined;
-}
+  // Frame positions are indexed, so chunks become JUNK of the same size
+  toPatches: (_r, selected) =>
+    selected.map((s) =>
+      s.cut
+        ? cut(s.kind, s.offset, s.length)
+        : {
+            kind: s.kind,
+            offset: s.offset,
+            length: s.length,
+            bytes: concatBytes(ascii("JUNK"), uintBytes(s.length - 8, 4, true)),
+            zeros: s.length - 8,
+          },
+    ),
+};
