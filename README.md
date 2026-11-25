@@ -194,4 +194,4 @@ The tests build small files byte by byte for every format and check that metadat
 
 ## License
 
-MIT © nova.wtf
+PolyForm Shield License 1.0.0 © nova.wtf
