@@ -1,0 +1,70 @@
+{
+  "name": "@nova-wtf/exif-extractor",
+  "publishConfig": {
+    "access": "public"
+  },
+  "version": "0.1.2",
+  "description": "Remove EXIF and other metadata from images and videos, in the browser and on the server. No dependencies.",
+  "author": "ArdaEmek",
+  "license": "PolyForm-Shield-1.0.0",
+  "keywords": [
+    "exif",
+    "xmp",
+    "metadata",
+    "strip",
+    "remove",
+    "privacy",
+    "gps",
+    "jpeg",
+    "png",
+    "webp",
+    "mp4",
+    "mov",
+    "webm",
+    "mkv",
+    "avi",
+    "browser"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nova-wtf/exif-extractor.git"
+  },
+  "homepage": "https://github.com/nova-wtf/exif-extractor#readme",
+  "bugs": {
+    "url": "https://github.com/nova-wtf/exif-extractor/issues"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "sideEffects": false,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "prepare": "tsc",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "prepublishOnly": "npm run build && npm test",
+    "preversion": "bun run test && bun run build",
+    "release:patch": "npm version patch && git push --follow-tags",
+    "release:minor": "npm version minor && git push --follow-tags"
+  },
+  "devDependencies": {
+    "eslint": "^10.15.0",
+    "eslint-plugin-headers": "^1.3.5",
+    "typescript": "^5.9.0",
+    "typescript-eslint": "^8.74.0",
+    "vitest": "^5.1.0"
+  }
+}
